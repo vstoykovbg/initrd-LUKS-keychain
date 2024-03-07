@@ -1,0 +1,744 @@
+#!/bin/sh
+
+script_version="06032024-0247"
+
+PREREQ=""
+
+# Output prerequisites
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+
+. /scripts/lukskeychainfunctions
+
+GLOBAL_skip_automatic_search_by_name_lukskeychain="no"
+GLOBAL_first_user_interaction="no"
+
+
+
+try_to_mount_device() {
+
+    this_device=$1
+
+    mount_point="/mntpoints/$(echo "${this_device}" | sed 's/\//m/g')"
+
+    mount_points_of_this_device=$(awk '$1 == "/dev/${this_device}" {print $2}' /proc/mounts)
+
+    # Check if already mounted at the expected location.
+    # This could be due to manual mounting by the user or a previous attempt with this function
+    # that failed (e.g., due to an incorrect passphrase).
+
+    if [ ! -z "${mount_points_of_this_device}" ]; then 
+        echo "The device ${this_device} is already mounted at: ${mount_points_of_this_device}"
+        if [ -z "$(echo "$mount_points_of_this_device" | grep -w "$mount_point")" ]; then 
+           echo "However, its mount point is unexpected."
+           echo "The function try_to_mount_device() is returning status 1 because this is confusing."
+           debug_pause 5
+           return 1
+        else
+           return 0
+        fi
+    fi
+
+    mounted=$(awk '$2 == "${mount_point}" {print $1}' /proc/mounts)
+    
+    if [ ! -z "${mounted}" ]; then 
+        echo "We have a device already mounted at ${mount_point}."
+        if [ "${this_device}" = "${mounted}" ]; then 
+          echo "It is the same device ${this_device} we are trying to mount."
+          debug_pause 5
+          return 0
+        else
+          echo "However, it's not the same device ${this_device} we are trying to mount, it is ${mounted}."
+          echo "The function try_to_mount_device() is returning status 1 because this is confusing."
+          debug_pause 5
+          return 1
+        fi
+    fi
+    
+    mkdir -p "${mount_point}"
+    
+    echo "DEBUG: try_to_mount_device ${this_device}"
+    debug_pause 5
+
+    # Tested to work with vfat and ext4.
+    mount -o ro "${this_device}" "${mount_point}"
+    mount_status=$?
+
+    # Tested to work with btrfs. It does not work without "-t btrfs".
+    if [ $mount_status -gt 0 ]; then
+      mount -o ro -t btrfs "${this_device}" "${mount_point}"
+      mount_status=$?
+    fi
+       
+    if [ $mount_status -eq 0 ]; then
+
+        keychain_files_possible="${mount_point}/lkskchn.dat ${mount_point}/lukskeychain.dat ${mount_point}/.lukskeychain.dat ${mount_point}/.lkskchn.dat"
+
+        keychain_file_path=$(ls $keychain_files_possible 2>/dev/null | sed -n '1p')
+
+        if [ -z "${keychain_file_path}" ]; then # if no file is found
+            echo "No keychain file found in the filesystem."
+            
+            echo "Unmounting the filesystem at \"${mount_point}\"..."
+            umount "${mount_point}"
+            echo "Removing the directory \"${mount_point}\"..."
+            rmdir "${mount_point}"
+            debug_pause 5
+            return 1
+
+        fi
+        
+        cryptsetup_luksDump_output=$(cryptsetup luksDump "${keychain_file_path}" 2>&1 | grep "is not a valid LUKS device")
+
+        if [ -z "${cryptsetup_luksDump_output}" ]; then # if no error message
+
+          cryptsetup open --readonly "${keychain_file_path}" keychaintmp
+          cryptsetup_exit_status=$?
+
+          if [ $cryptsetup_exit_status -eq 0 ]; then # If the encrypted keychain is opened...
+            echo "Encrypted container ${keychain_file_path} opened successfully."
+            debug_pause 5
+            return 0
+          else
+              echo "Error while tryiing to open the ${keychain_file_path} encrypted container, cryptsetup exit status: $cryptsetup_exit_status"
+              echo "Unmounting the filesystem at \"${mount_point}\"..."
+              umount "${mount_point}"
+              echo "Removing the directory \"${mount_point}\"..."
+              rmdir "${mount_point}"
+              debug_pause 5
+              return 1 # Mounted but failed to open encrypted container within the filesystem.
+          fi
+
+        else
+          echo "LUKS header not found in ${keychain_file_path}."
+          echo "Unmounting the filesystem at \"${mount_point}\"..."
+          umount "${mount_point}"
+          echo "Removing the directory \"${mount_point}\"..."
+          rmdir "${mount_point}"
+          debug_pause 5
+          return 1 # Mounted but failed to open encrypted container within the filesystem.
+        fi
+
+        return 0 # Success.
+    else
+        echo "Failed to mount ${this_device}."
+        return 2 # Failed to mount.
+    fi    
+
+}
+
+
+dialog_1() {
+
+    this_device=$1
+
+    try_to_mount_device "${this_device}"
+    mount_status=$?
+
+    if [ $mount_status -eq 0 ]; then
+      return 0 # Success.
+    elif [ $mount_status -eq 1 ]; then
+      return 1 # Mounted but failed to open encrypted container within the filesystem.
+    fi
+   
+    
+    # If other exit status - continue.
+
+    while :; do
+      echo
+      echo "Choose an option:"
+      echo
+      echo "1. plainOpen: open --type plain (FIXME: ripemd160 not supported by cryptsetup?)"
+      echo "2. loopaesOpen: open --type loopaes (FIXME: does not work without a key parameter)"
+      echo "3. tcryptOpen: open --type tcrypt"
+      echo "4. bitlkOpen: open --type bitlk"
+      echo "5. Custom parameters (only parameteres between cryptsetup and the device path)."
+      echo "6. Dropping to /bin/sh to execute custom commands."
+      echo "7. Search for another device by UUID or blkid line substring."
+      echo
+      echo "Alternative shortcuts: p, l, t, b, c, d/s, u"
+      echo
+      echo "In BusyBox (initramfs) environment cryptsetup have a limited functionality, i.e. ripemd160 may not work."
+      echo
+      clear_input_buffer
+      echo -n "Enter your choice by pressing [1-7]: "
+
+      read -n 1 -r choice
+      clear_character
+      echo ""
+      
+      #if [ -z "${choice}" ]; then # if it's empty
+      #  choice="4"
+      #fi
+
+      case $choice in
+           1|p) selected_option="plainOpen"; break;;
+           2|l) selected_option="loopaesOpen"; break;;
+           3|t) selected_option="tcryptOpen"; break;;
+           4|b) selected_option="bitlkOpen"; break;;
+           5|c) clear_input_buffer
+                echo "Please type the custom parameters."
+                echo "For example, to execute 'cryptsetup tcryptOpen "${this_device}" keychaintmp' type only 'tcryptOpen' "
+                read selected_option; break;;
+         6|d|s) echo "Example command: cryptsetup tcryptOpen "${this_device}" keychaintmp"
+               if [ -r /usr/bin/mcedit ];  then 
+                   echo "Dropping to shell... (Programs 'mc' and 'mcedit' are available.)"
+               else
+                   echo "Dropping to shell..."
+               fi
+               /bin/sh
+               if [ -e "/dev/mapper/keychaintmp" ]; then
+                 return 0
+               else
+                 return 1
+               fi
+               ;;
+          7|u) return 2;;
+            *) echo "Invalid choice. Please choose a number between 1 and 7.";;
+      esac
+    done
+
+    echo "cryptsetup ${selected_option} "${this_device}" keychaintmp"
+    cryptsetup ${selected_option} "${this_device}" keychaintmp
+    cryptsetup_exit_status=$?
+
+    return $cryptsetup_exit_status
+}
+
+
+
+
+
+loop_trying_to_open_device() {
+
+    this_device=$1
+
+    dialog_1_return_status=0
+
+    echo "DEBUG: \$dialog_1_return_status: \"$dialog_1_return_status\" (at the beginning of loop_trying_to_open_device())."
+    if [ $dialog_1_return_status -eq 0 ]; then
+        echo "DEBUG: the number is 0."
+    fi
+    debug_pause 5
+    
+
+
+    # FIXME: there is no continue or break in this loop, only exit and return. Do wee need it? 
+    while :; do # The main loop of loop_trying_to_open_device()
+
+        cryptsetup_luksDump_output=$(cryptsetup luksDump "${this_device}" 2>&1 | grep "is not a valid LUKS device")
+
+        if [ -z "${cryptsetup_luksDump_output}" ]; then # if no error message
+
+          cryptsetup open --readonly "${this_device}" keychaintmp
+          cryptsetup_exit_status=$?
+          
+        else
+          echo "LUKS header not found, we will try to open it anyway."
+
+          dialog_1 "${this_device}"
+          dialog_1_return_status=$?
+          cryptsetup_exit_status=$dialog_1_return_status
+          
+        fi
+
+        # Here we check the exit status.
+        if [ $cryptsetup_exit_status -eq 0 ]; then # If the encrypted keychain is opened...
+
+            mount -o ro /dev/mapper/keychaintmp /mykeys
+
+            echo "Files in the keychain directory:"
+            ls /mykeys/
+                    
+            # DO NOT USE FILENAMES WITH SPACES IN CRYPTTAB
+            list_keys=$(awk '{print $3}' /cryptroot/crypttab.key | awk '!a[$0]++')
+           
+            if [ "${list_keys}" = "none" ]; then
+               list_keys=""
+            elif echo "${list_keys}" | grep -q -E '^[[:space:]]+$'; then
+               list_keys=""
+            fi
+
+            error_flag="ok"
+
+            if [ "${error_flag}" = "ok" ]; then
+              echo "DEBUG: error_flag should be ok here. (checkpoint 0)"
+            fi
+            
+            echo "DEBUG: error_flag: \"${error_flag}\" (checkpoint 1)"
+            
+            
+            if [ -z "${list_keys}" ]; then # This is not a redundant check, here we check if the specified keys exist.
+                echo "Can't find key paths in /cryptroot/crypttab.key."
+                echo "Therefore we keep the original /cryptroot/crypttab."
+                debug_pause 5
+            else
+                for this_key in ${list_keys}; do
+
+                  if [ -e "${this_key}" ]; then
+                      echo "The key ${this_key} is existing."
+                  else
+                      echo "The key ${this_key} is NOT existing."
+                      error_flag="error"
+                      echo "DEBUG: error_flag: \"${error_flag}\" (checkpoint 2)"
+                  fi
+
+                  if [ -r "${this_key}" ]; then
+                      echo "The key ${this_key} is readable."
+                  else
+                      echo "The key ${this_key} is NOT readable."
+                      error_flag="error" # ignoring the error, not readable is normal?
+                      echo "DEBUG: error_flag: \"${error_flag}\" (checkpoint 3)"
+                  fi
+
+                  debug_pause 5
+
+                done
+
+                echo "DEBUG: error_flag: \"${error_flag}\" (checkpoint 4)"
+                
+                if [ "${error_flag}" = "ok" ]; then
+                    echo "Copying /cryptroot/crypttab.key to /cryptroot/crypttab... (This is NOT the key, it's a cryptsetup configuration file.)"
+                    cp /cryptroot/crypttab.key /cryptroot/crypttab
+
+                    echo "We've finished here ($0). Continuing boot process..."
+                    
+                    debug_pause 5
+
+                    exit 0
+
+                else
+                    echo "One or more of the key files specified in the /cryptroot/crypttab.key file"
+                    echo "are missing or not readable."
+                    echo "Therefore we keep the original /cryptroot/crypttab."
+                    
+                    debug_pause 5
+
+                fi
+
+            fi
+
+            exit
+
+        else
+            
+            echo "DEBUG: \$dialog_1_return_status: \"$dialog_1_return_status\""
+            debug_pause 5
+            if [ $dialog_1_return_status -eq 2 ]; then
+                echo "Returning to the previous step."
+                return 2
+            else
+                echo "Did not opened the encrypted keychain."
+                return 1
+            fi
+
+        fi
+
+    done # The main loop of loop_trying_to_open_device()
+
+}
+
+
+
+selected_device="" # Global variable - changed by search_by_UUID_inner()
+first_retry="yes" # Global variable
+
+search_by_UUID_inner() {
+
+    this_blkid_line_substring="$1"
+
+    # Only one of the devices with that UUID pattern is returned!
+    #selected_device=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep "${this_blkid_line_substring}" | cut -d \: -f 1 | sed -n '1p')
+    search_results=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep "${this_blkid_line_substring}")
+   
+    if [ -z "${search_results}" ]; then 
+        return 1
+    elif [ "$(echo "$search_results" | wc -l)" -eq 1 ]; then 
+        selected_device=$(echo "$search_results" | awk -F ':' '{print $1}')
+        echo "Found one device mathcing your substring: $selected_device"
+    else 
+        echo "Found many devices matching your substring:"
+        index=1
+        echo "$search_results" | while IFS= read -r line; do
+            echo "$index. $line"
+            index=$((index+1))
+        done
+        
+        index=$(echo "$search_results" | wc -l)
+        
+        index_plus_one=$((index+1))
+        echo "${index_plus_one}. Return to the previous menu (alternative key: m)."
+                
+        echo "DEBUG: recalculated index: $index"
+        echo ""        
+        valid_choice=false
+        while [ "$valid_choice" = false ]; do
+            read -p "Type the number of the device you want to choose (or type m to return) and press Enter: " choice
+            echo "DEBUG: Choice: $choice"
+            echo "DEBUG: Index: $index"
+           
+            if [ "$choice" = "$index_plus_one" ] || [ "$choice" = "m" ]; then
+                selected_device=""
+                if [ "${this_blkid_line_substring}" = "lukskeychain" ]; then
+                   GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+                fi
+                return 2
+            elif [ "$choice" -ge 1 ] && [ "$choice" -le "$index" ]; then
+                selected_device=$(echo "$search_results" | sed -n "${choice}p" | cut -d ':' -f 1)
+                valid_choice=true
+            else
+                echo "Invalid input. Please enter a valid number."
+            fi
+        done
+
+    fi
+
+    echo "You chose device: \"$selected_device\""
+    
+}
+
+search_by_UUID() {
+
+    # exit - to cancel the search and continue booting normally / used
+    # continue - to continue the loop / used several times
+    # break - to exit from the loop / not used here
+    # return - to exit from this subroutine / not used here
+
+    this_UUID="$1"
+    first_retry="$2"
+
+    timeout=60
+
+    while :; do
+
+        selected_device="" # Global variable - changed by search_by_UUID_inner()
+
+        # When it's not the first time this subroutine is executed we
+        # want to ask the user about which UUID to open. 
+        
+        # I don't remember why I wrote the above comment.
+        
+        echo "DEBUG: Checking if \$this_UUID is empty string..."
+        
+        if [ "${this_UUID}" = "" ]; then
+            echo "List of devices from blkid:"
+            blkid | grep "^/dev/" | grep -v "^/dev/loop"
+            read -p "Type a UUID (or a unique substring from a blkid output line) and press Enter: " this_UUID
+        fi
+        
+        if [ "${first_retry}" = "yes" ]; then
+            timeout=30
+        fi
+
+        echo "Trying to find a device with a blkid line containing the string \"${this_UUID}\"..."
+        search_by_UUID_inner "${this_UUID}" # Changing the $selected_device global variable.
+
+
+        if [ ! -z "${selected_device}" ]; then 
+
+            echo "Found a device with the specified UUID (or blkid line substring) pattern:"
+            blkid | grep "^${selected_device}:"
+
+            loop_trying_to_open_device "${selected_device}"
+            loop_trying_to_open_device_exit_status=$?
+            
+            echo "DEBUG: checking if the \$loop_trying_to_open_device_exit_status is 2 (it's \"$loop_trying_to_open_device_exit_status\")..."
+            
+            if [ $loop_trying_to_open_device_exit_status -eq 2 ]; then
+              this_UUID=""
+            fi
+            
+            first_retry="no"
+
+        else
+
+
+            # if [ "${first_retry}" = "yes" ]; then
+            # The previous version of the script tried only once this block of code
+            if [ "${GLOBAL_skip_automatic_search_by_name_lukskeychain}" = "no" ]; then
+
+                #echo ""
+                #echo "Device with UUID (or blkid line substring) \"${this_UUID}\" not found."
+
+                if [ "${GLOBAL_skip_automatic_search_by_name_lukskeychain}" = "no" ]; then
+
+                    #GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+
+                    #echo "Trying to find a device with a label or name containing the string 'lukskeychain'..."
+                    dialog_skip_or_do 5 "Trying to find a device with a label or name containing the string 'lukskeychain'..."
+                        if [ $? -gt 0 ]; then # if not opened we will not retry
+                            GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+                            continue
+                        fi
+
+                    # Only one of the devices with that string is returned!
+                    # selected_device=$(blkid | grep lukskeychain | cut -d \: -f 1 | sed -n '1p')
+
+                    # This version allows the user to select when many devices with 'lukskeychain' in the label are found.
+                    search_by_UUID_inner "lukskeychain" # Changing the $selected_device global variable.
+
+                    if [ ! -z "${selected_device}" ]; then 
+
+                      loop_trying_to_open_device "${selected_device}"
+                        if [ $? -gt 0 ]; then # if not opened we will not retry
+                            GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+                        fi
+                        
+                      first_retry="no"
+                      continue
+                      
+                    fi
+                
+                fi
+
+            fi
+
+            echo ""
+            # echo "Choose an option:"
+            echo "Choose an option:          (DEBUG: version: ${script_version} functions $script_version_functions)"
+            echo ""      
+            echo "1 - To retry with UUID (or blkid line substring) \"${this_UUID}\", press '1' or 'r'."
+            echo ""
+            echo "2 - To try with another UUID (or substring from blkid line), press '2' or 'u'."
+            echo ""
+            echo "3 - To start /bin/sh, press '3' or 's' or 'd'."
+            echo ""
+            echo "4 - To cancel (the search for the encrypted keychain), press '4' or 'c'."
+            echo ""
+            if [ "${default_UUID}" !=  "${this_UUID}" ]; then
+                echo "5 - To retry with the default \"${default_UUID}\", press '5' or 'f'."
+                echo ""            
+            fi
+            clear_input_buffer
+            echo "If no input is received within $timeout seconds, the default option (retry) will be chosen."
+
+            choice="1" # Setting the default value of choice to '1' because the BusyBox read command
+                       # doesn't change its value when no user input is provided.
+            
+            read -t $timeout -n 1 -r choice
+            clear_character
+
+            if [ -z "${choice}" ]; then
+                echo "Retrying..."
+                first_retry="yes"
+            else # the choice is not retry
+            
+                #echo "Enter UUID (or unique part of it):"
+                #read this_UUID
+
+                case "${choice}" in
+                    1|r)
+                        echo "Retrying..."
+                        first_retry="yes"
+                        continue
+                        ;;
+                        
+                    2|u)
+                        echo "List of devices from blkid:"
+                        blkid | grep "^/dev/" | grep -v "^/dev/loop"
+                        read -p "Type a UUID (or a unique substring from a blkid output line) and press Enter: " this_UUID
+                        first_retry="yes"
+                        continue
+                        ;;
+                    3|s|d)
+                        echo "Type 'exit' and press Enter to return to this menu."
+                        # echo "After you exit from /bin/sh, you will return to this menu."
+                        if [ -r /usr/bin/mcedit ];  then 
+                            echo "Programs 'mc' and 'mcedit' are available."
+                        fi                        
+                        /bin/sh
+                        continue
+                        ;;
+                    4|c)
+                        exit 0
+                        ;;
+                    5|f)
+                        this_UUID="${default_UUID}"
+                        continue
+                        ;;
+                    *)
+                        echo ""
+                        echo "Invalid option selected."
+                        continue
+                        ;;
+                esac
+
+            fi
+
+
+        fi
+
+    done
+
+
+}
+
+
+check_keys(){
+    list_keys="$1"
+
+    
+    for this_key in ${list_keys}; do
+
+        this_dir="$(dirname "${this_key}")"
+
+        expected_directory="/mykeys"
+
+        # if [ "${this_dir}" =  ${expected_directory} ]; then # previous version - bad
+        # if [ "$(echo "${this_dir}" | grep -q "^${expected_directory}")" ]; then # also bad
+
+        if echo "${this_dir}/" | grep -q "^${expected_directory}/"; then
+            echo "The key '${this_key}' is within '${this_dir}', this is expected."
+        else
+            echo "The key '${this_key}' is within '${this_dir}'. This is not expected."
+            echo "We expect to find only keys within the '${expected_directory}'"
+            
+            echo "DEBUG: echo \"${this_dir}/\" | grep \"^${expected_directory}/\""
+            echo "${this_dir}/" | grep "^${expected_directory}/"
+            echo "DEBUG: end of output"
+
+            while :; do # dialog loop
+
+                timeout=30
+                echo "Press 's' to drop to shell or 'c' to continue booting with the default crypttab (withouit opening the encrypted keychain)."
+                clear_input_buffer
+                echo "If no input is received within $timeout seconds, the default option (continue) will be chosen."
+                
+                choice="1" # Setting the default value of choice to '1' because the BusyBox read command
+                           # doesn't change its value when no user input is provided.
+                
+                read -t $timeout -n 1 -r choice
+                clear_character
+
+                case "${choice}" in
+                    1|c)
+                        echo "Continue booting"
+                        debug_pause 5
+                        exit
+                        ;;
+                        
+                    2|s|d)
+                        echo "Type 'exit' and press Enter to return to this menu."
+                        echo "After you exit from /bin/sh the file /cryptroot/crypttab.key will be rechecked for key paths."
+                        if [ -r /usr/bin/mcedit ];  then 
+                            echo "Dropping to shell... (Programs 'mc' and 'mcedit' are available.)"
+                        else
+                            echo "Dropping to shell..."
+                        fi
+                        /bin/sh
+                        return 1
+                        ;;
+                    *)
+                        echo ""
+                        echo "Invalid option selected."
+                        break
+                        ;;
+                esac
+
+            done # dialog loop
+        fi
+
+    done
+
+}
+
+
+echo "Starting lukskeychain script... (version $script_version, functions version $script_version_functions)"
+
+# There is no disk/by-uuid so we can't do this:
+#cryptsetup open --readonly /dev/disk/by-uuid/${this_UUID} keychain
+
+while :; do
+
+    # DO NOT USE FILENAMES WITH SPACES IN CRYPTTAB
+    list_keys=$(awk '{print $3}' /cryptroot/crypttab.key | awk '!a[$0]++')
+   
+    if [ "${list_keys}" = "none" ]; then
+       list_keys=""
+    elif echo "${list_keys}" | grep -q -E '^[[:space:]]+$'; then
+       list_keys=""
+    fi
+    
+    if [ -z "${list_keys}" ]; then
+        echo "Can't find key paths in /cryptroot/crypttab.key"
+        #echo "Dropping to shell... (After exiting the script will continue as usual.)"
+        #echo "Type exit and press Enter to exit from the shell."
+        #/bin/sh
+        
+        timeout=60
+        echo "Press 's' to drop to shell or 'c' to continue booting with the default crypttab (withouit opening the encrypted keychain)."
+        clear_input_buffer
+        echo "If no input is received within $timeout seconds, the default option (continue) will be chosen."
+        
+        choice="1" # Setting the default value of choice to '1' because the BusyBox read command
+                   # doesn't change its value when no user input is provided.
+        
+        read -t $timeout -n 1 -r choice
+        clear_character
+
+            if [ -z "${choice}" ]; then
+                echo "Continue booting"
+                debug_pause 5
+                exit               
+            else # the choice is not retry
+            
+                case "${choice}" in
+                    1|c)
+                        echo "Continue booting"
+                        debug_pause 5
+                        exit
+                        ;;
+                        
+                    2|s|d)
+                        echo "Type 'exit' and press Enter to return to this menu."
+                        if [ -r /usr/bin/mcedit ];  then 
+                            echo "Type 'mcedit /cryptroot/crypttab.key' and press Enter to edit the file."
+                        fi
+                        echo "After you exit from /bin/sh the file /cryptroot/crypttab.key will be rechecked for key paths."
+                        /bin/sh
+                        continue
+                        ;;
+                    *)
+                        echo ""
+                        echo "Invalid option selected."
+                        continue
+                        ;;
+                esac
+
+            fi
+      
+    else
+
+        echo "Analyzing key paths in '/cryptroot/crypttab.key'..."
+        check_keys "${list_keys}"
+        if [ $? -eq 0 ]; then
+            break
+        fi
+    fi
+done
+
+# Default UUID
+default_UUID="fcc2a7e6-8b26-4055-a473-53132bbeb56f"
+
+mkdir /mntpoints
+
+echo "Searching for the default UUID ${default_UUID}..."
+
+
+while :; do
+
+    search_by_UUID ${default_UUID} ${first_retry}
+    
+    first_retry="no"
+        
+done
+
