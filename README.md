@@ -22,7 +22,7 @@ With this configuration, unauthorized access to the encrypted partitions remains
 
 ### RAM Wipe
 
-At least one copy of the key is kept in volatile memory (we hope securely) to access the encrypted data, but we try to erase other copies from the RAM to reduce the risk and delete the only copy of the key for the LUKS keychain after it's not needed.
+At least one copy of the key is kept in volatile memory (we hope securely) to access the encrypted data, but we try to erase other copies from the RAM to reduce the risk (and remove from RAM the only copy of the key for the LUKS keychain after it's not needed).
  
 After the encrypted partitions (root and others) are unlocked and the LUKS keychain (the encrypted container containing the keys) is closed, while still in the initial ram disk environment, disk caches are dropped using `echo 3 > /proc/sys/vm/drop_caches`. Additionally, the `sdmem` program is invoked to wipe the unused RAM, preventing the keys from being retained in the disk cache (within the RAM). It is assumed that the passphrase used to decrypt the LUKS keychain is securely handled by `cryptsetup`, as it is directly accepted by `cryptsetup` without intermediary applications. In the scenario where the encrypted LUKS keychain is used, there is no password caching with `keyscript=decrypt_keyctl`.
 
