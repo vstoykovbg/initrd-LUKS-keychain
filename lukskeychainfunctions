@@ -1,0 +1,159 @@
+#!/bin/sh
+
+script_version_functions="06032024-0247"
+
+PREREQ=""
+
+# Output prerequisites
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+
+clear_the_line() {
+    echo -ne "\033[2K" ; echo -ne "\r"
+}
+
+clear_the_line_go_up_and_clean_the_line() {
+   echo -ne "\033[2K" # erase line
+   echo -ne "\033[A\033[K" # up and erase to end of line (and go to new line)
+   echo -ne "\033[2K" # erase line
+   echo -ne "\r"
+}
+
+
+clear_input_buffer() {
+
+    echo -n "  Clearing the input buffer (1 second)..."
+    read -t 1 -n 111
+    clear_the_line
+
+   # Non-working examples in my version of BusyBox:
+   
+   #while read -t 0; do : ; done
+   #read -d '' -t 0 -n 1
+   #read -t 0 -n 1
+   
+}
+
+
+# Function to clear the character
+clear_character() {
+    printf '\b \b'  # Move the cursor back, print a space, move the cursor back again
+}
+
+
+debug_pause() {
+
+    if [ -n "${1}" ]; then
+        timeout=$1
+    else
+        timeout=5
+    fi
+
+    while :; do
+
+        echo "[ DEBUG: debug_pause ${timeout} / script version: ${script_version}/${script_version_functions} ]"
+
+        clear_input_buffer
+        clear_the_line_go_up_and_clean_the_line
+        echo "Press 's' to drop to shell, or wait $timeout seconds to continue automatically, or press the spacebar to continue now..."
+
+        choice="" # Setting the default value of choice to '' because the BusyBox read command
+                  # doesn't change its value when no user input is provided.
+
+        # Read a single character with timeout
+        read -t $timeout -n 1 -r choice
+        clear_the_line_go_up_and_clean_the_line
+        # clear_character
+        
+        if [ "${choice}" = "s" ] || [ "${choice}" = "d" ]; then
+            if [ -r /usr/bin/mcedit ];  then 
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit. Programs 'mc' and 'mcedit' are available.)"
+            else
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit.)"
+            fi
+            /bin/sh
+            break
+        elif [ -n "${choice}" ]; then
+            continue
+        else
+            break
+        fi
+
+    done
+
+    echo "Continuing..."
+    clear_input_buffer
+    clear_the_line_go_up_and_clean_the_line
+}
+
+
+dialog_skip_or_do() {
+
+    if [ -n "${1}" ]; then
+        timeout_dialog_skip_or_do=$1 # local variable
+    else
+        echo "ERROR: timeout not specified."
+        exit 2
+    fi
+
+    if [ -n "${2}" ]; then # if string is not null
+       echo "${2}"
+    fi
+
+    while :; do
+
+        clear_input_buffer
+        clear_the_line
+        
+        echo "Press 'c' to cancel, or press 's' to drop to shell,"
+        echo "or wait $timeout_dialog_skip_or_do seconds to continue automatically, or press the spacebar to continue now..."
+
+        choice="" # Setting the default value of choice to '' because the BusyBox read command
+                  # doesn't change its value when no user input is provided.
+
+        # Read a single character with timeout
+        read -t $timeout_dialog_skip_or_do -n 1 -r key
+        clear_the_line_go_up_and_clean_the_line
+        # clear_character
+        
+        if [ "${choice}" = "s" ] || [ "${choice}" = "d" ]; then
+            if [ -r /usr/bin/mcedit ];  then 
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit. Programs 'mc' and 'mcedit' are available.)"
+            else
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit.)"
+            fi
+            /bin/sh
+            break
+        elif [ "${choice}" = "c" ]; then
+            echo "Cancelling..."
+            clear_input_buffer
+            clear_the_line_go_up_and_clean_the_line
+            clear_the_line_go_up_and_clean_the_line
+            echo "... Canceled."
+            return 1
+        elif [ -n "${choice}" ]; then
+            continue
+        else
+            break
+        fi
+
+    done
+
+    echo "Continuing..."
+    clear_input_buffer
+    clear_the_line_go_up_and_clean_the_line
+    if [ -n "${2}" ]; then # if string is not null
+        clear_the_line_go_up_and_clean_the_line
+    fi
+    return 0
+}
+
