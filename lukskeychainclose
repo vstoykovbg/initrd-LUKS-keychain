@@ -1,0 +1,167 @@
+#!/bin/sh
+
+script_version="06032024-0247"
+
+PREREQ=""
+
+# Output prerequisites
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+
+. /scripts/lukskeychainfunctions
+
+
+ask_for_memory_wipe_and_exit() {
+
+if [ -e "/usr/bin/sdmem" ]; then
+
+    dialog_skip_or_do 10 "If you don't cancel it the memory wipe will be performed (it may take time)..."
+
+        if [ $? -gt 0 ]; then
+            echo "Sync..."
+            sync
+            echo "Dropping caches with 'echo 3 > /proc/sys/vm/drop_caches'..."
+            echo 3 > /proc/sys/vm/drop_caches
+            echo "Sync..."
+            sync
+            echo "Cleaning the unused RAM with sdmem (in a 'fast' mode by writing zeroes, but it may take time)..."
+            /usr/bin/sdmem -l -l
+        fi
+
+else
+    echo "The program sdmem for wiping the free RAM is not installed, we skip this step."
+    debug_pause 5
+fi
+
+exit
+}
+
+echo "Starting lukskeychainclose script... (version $script_version, functions version $script_version_functions)"
+
+user_interaction() {
+    while :; do
+        echo "Press Enter to drop to the shell or type 'security risk'"
+        echo "and press Enter to leave it and continue."
+        read this_answer
+        if [ "${this_answer}" = "security risk" ]; then
+            echo "Continuing with the boot..."
+            ask_for_memory_wipe_and_exit
+        elif [ -z "${this_answer}" ]; then
+            echo "After exiting from the shell, another automatic attempt to"
+            echo "unmount and close the keychains will be made."
+            echo "Example commands:"
+            echo " umount /mykeys"
+            echo " cryptsetup close keychaintmp"
+            if [ -r /usr/bin/mcedit ];  then 
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit. Programs 'mc' and 'mcedit' are available.)"
+            else
+                echo "Dropping to shell... (Type 'exit' and press Enter to exit.)"
+            fi
+            /bin/sh
+            return
+        else
+            echo "Unexpected user input."
+            continue
+        fi
+    done
+}
+
+debug_pause 5
+
+# Find devices mounted at /mykeys mountpoint
+# We keep these variables unchanged for future reference (in case we use them in future versions of the script)
+mounted_devices_full_list=$(awk '$2 == "/mykeys" {print $1}' /proc/mounts)
+mounted_devices_mapper_list=$(echo "${mounted_devices_full_list}" | awk '$0 ~ "^/dev/mapper/" {print}')
+
+# The above lines are intentionally placed outside the loop.
+
+while :; do
+
+    # First, attempt to unmount each device mounted at /mykeys and then close it without user interaction
+    # and close all encrypted containers with filesystems previously mounted at /mykeys.
+
+    for this_device in $mounted_devices_full_list; do
+        echo "Trying to unmount ${this_device}..."
+        # umount "${this_device}" # this does not work with busybox - "Invalid argument"
+        umount /mykeys
+    done
+
+    for this_device in $mounted_devices_mapper_list; do
+        echo "Trying to close ${this_device}..."
+        cryptsetup close "${this_device##*/}"
+    done
+
+    echo "Unmounting all filesystems from /mntpoints/* (if any)..."
+    umount /mntpoints/*
+
+    # List of the devices mounted on /mykeys. Typically we expect only one
+    # device to be mounted there, but in case of user mistake there might be
+    # many devices mounted at the same mount point.
+
+    mounted_devices=$(awk '$2 == "/mykeys" {print $1}' /proc/mounts)
+
+    list_of_not_closed_mapper_devices=""
+    for this_device in $mounted_devices_mapper_list; do
+        # Check if the device exists in /dev/mapper directory
+        if [ -e "${this_device}" ]; then
+            list_of_not_closed_mapper_devices="${list_of_not_closed_mapper_devices} ${this_device}"
+        fi
+    done
+
+    if [ -z "${list_of_not_closed_mapper_devices}${mounted_devices}" ]; then
+        echo "Looks like we have all filesystems unmounted from /mykeys and all encrypted containers"
+        echo "with filesystems previously mounted at /mykeys closed. So we continue booting."
+        
+        echo "Unmounting all filesystems from /mntpoints/* (if any)..."
+        umount /mntpoints/*
+
+        debug_pause 5
+        ask_for_memory_wipe_and_exit
+    else
+        if [ ! -z "${mounted_devices}" ]; then
+            if echo "${mounted_devices}" | grep -q '[[:space:]]'; then
+                echo "This is the list of devices mounted on /mykeys:"
+                echo "${mounted_devices}"
+                echo "Please unmount them manually."
+            else
+                echo "This is a device mounted on /mykeys:"
+                echo "${mounted_devices}"
+                echo "Please unmount it manually."
+            fi
+        fi
+
+        if [ ! -z "${list_of_not_closed_mapper_devices}" ]; then
+            if echo "${list_of_not_closed_mapper_devices}" | grep -q '[[:space:]]'; then
+                echo "This is the list of devices containing filesystem mounted on /mykeys:"
+                echo "${list_of_not_closed_mapper_devices}"
+                echo "Please close it manually."
+            else
+                echo "This is the device containing a filesystem mounted on /mykeys:"
+                echo "${list_of_not_closed_mapper_devices}"
+                echo "Please close it manually."
+            fi
+
+            if [ ! -z "${mounted_devices}" ]; then
+                echo "Alternatively, you can only unmount its filesystem and exit the shell."
+                echo "After you exit from the shell, an automatic retry to close the device(s) will be made."
+            fi
+        fi
+
+        echo "Unmounting all filesystems from /mntpoints/* (if any)..."
+        umount /mntpoints/*
+
+        user_interaction
+    fi
+done
+
+ask_for_memory_wipe_and_exit
+
