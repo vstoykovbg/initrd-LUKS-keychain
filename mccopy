@@ -1,0 +1,157 @@
+#!/bin/sh
+
+set -e
+
+PREREQ=""
+
+prereqs () {
+    echo "$PREREQ"
+}
+
+case $1 in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+echo "DESTDIR=\"${DESTDIR}\""
+
+# Function to recursively find dependencies using ldd
+recursive_ldd() {
+    binary="$1"
+    visited="$2"
+    dependencies=""
+
+    # Check if the binary has already been visited
+    case "$visited" in
+        *"$binary"*) return ;;
+    esac
+
+    # Add binary to visited list
+    visited="$visited $binary"
+
+    # Find dependencies using ldd and awk (first approach)
+    libs=$(ldd "$binary" 2>/dev/null | awk '/^\s*\// || /^\// {print $1}')
+
+    # Find dependencies using ldd and awk (second approach)
+    libs2=$(ldd "$binary" | awk '/=>/{print $(NF-1)}')
+
+    # Merge results, remove empty and whitespace lines, and sort
+    all_libs=$(printf "%s\n%s\n" "$libs" "$libs2" | grep -v '^[[:space:]]*$' | sort -u)
+
+    # Iterate over dependencies
+    for lib in $all_libs; do
+        # Skip empty lines
+        [ -z "$lib" ] && continue
+        
+        # Add dependency to the list
+        dependencies="$dependencies $lib"
+
+        # Recursively find dependencies of this dependency
+        dependencies="$dependencies $(recursive_ldd "$lib" "$visited")"
+    done
+
+    # Output the list of dependencies
+    [ -n "$dependencies" ] && echo "$dependencies" | tr ' ' '\n' | sort -u | grep -v '^[[:space:]]*$' 
+}
+
+
+
+copy_binary_and_dependencies() {
+
+    if [ -n "${1}" ]; then
+        binary="${1}"
+    else
+        echo "ERROR: No parameter specified at copy_binary_and_dependencies()."
+        exit 1
+    fi
+
+
+    if [ -e "${binary}" ]; then
+
+        echo "Copying $binary..."
+        cp --parents "${binary}" "${DESTDIR}"
+        
+        # there are some non-zero exit statuses in the recursive_ldd but it works
+        set +e
+        dependencies=$(recursive_ldd "$binary" "")
+        set -e
+
+        echo "Copying dependencies of $binary..."
+        for file in ${dependencies}; do
+            # Copy the file recursively to the destination directory
+            echo "Copying '${file}'..."
+            cp --parents "${file}" "${DESTDIR}"
+        done
+
+    else
+
+        echo "The program $binary is not found, we will not include it in the inintrd image."
+
+    fi
+
+}
+
+#DESTDIR="/tmp/DESTDIR_TEST" # DEBUG
+
+# Run recursive ldd
+binary="/usr/bin/mc"
+
+if [ -e "${binary}" ]; then
+
+    echo "We include mc and mcedit..."
+    
+    copy_binary_and_dependencies "${binary}"
+
+    others="
+    /lib/terminfo/l/linux
+    /usr/bin/mcedit
+    /usr/bin/mcdiff
+    /usr/bin/mcview
+    /lib/terminfo/l/linux
+    /usr/share/mc/mc.charsets
+    /etc/mc/mcedit.menu
+    /usr/share/mc/skins/default.ini
+    "
+
+    for file in ${others}; do
+        echo "Copying '${file}'..."
+        cp -a --parents "${file}" "${DESTDIR}"
+    done
+
+    echo "Copying /usr/lib/mc directory..."
+    cp -r -a "/usr/lib/mc" "${DESTDIR}/usr/lib/"
+
+    echo "Copying /usr/share/mc directory..."
+    cp -r -a "/usr/share/mc" "${DESTDIR}/usr/share/"
+
+    echo "Copying /etc/mc directory..."
+    cp -r -a "/etc/mc" "${DESTDIR}/etc"
+
+    # mcdiff does not work without diff
+
+    binary="/usr/bin/diff"
+
+    copy_binary_and_dependencies "${binary}"
+
+else
+    echo "WARNING: $binary is not installed, we will not include it in the inintramfs. "
+    echo "         The program mcedit is useful for editing config files."
+
+fi
+
+
+binary="/usr/bin/sdmem"
+
+if [ -e "${binary}" ]; then
+
+  echo "We include sdmem..."
+  copy_binary_and_dependencies "${binary}"
+  
+else
+    echo "WARNING: $binary is not installed, we will not include it in the inintramfs. "
+    echo "         We use sdmem to clean the ram after the encrypted keychain is closed."
+fi
+
+
