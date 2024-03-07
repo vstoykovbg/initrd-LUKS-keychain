@@ -32,7 +32,7 @@ After the encrypted partitions (root and others) are unlocked and the LUKS keych
 
 Supports storing the LUKS keychain in either an encrypted partition or an encrypted container file.
 
-## Configuration and Setup - TLDR version
+## Configuration and Setup
 
 1. **Prerequisites:**
    - Ubuntu 22.04 system with an LUKS-encrypted btrfs root filesystem. It may also work on other similar systems.
