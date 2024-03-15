@@ -185,7 +185,7 @@ Please note that certain text editors may mislead you by inserting a newline cha
 
 Unless you intend to use a version of cryptsetup that handles newlines differently, or you plan to back up the key on paper and type it manually, the discussion about newlines is likely not relevant to you. Nevertheless, for the sake of security and consistency, it's recommended to use key files with only a single line and no trailing newline character.
 
-I read somewhere that cryptsetup does only read the first line of a keyfile and ignores subsequent lines and newline characters. But this is not confirmed.
+I read somewhere that cryptsetup does only read the first line of a keyfile and ignores subsequent lines and newline characters. But this is not confirmed. (Or maybe I read about `gpg2 --passphrase-file` and misremembered that it was about cryptsetup?)
 
 I tested it, and it reads the .txt file like a binary file. I can't open the container when I modify the file by removing the last line or adding/removing newline characters. This behavior may differ with different versions. I tested with cryptsetup 2.4.3 on my Ubuntu installation. I haven't tested how it will work in the initrd version of cryptsetup (I noticed the initrd version doesn't support ripemd160, so there may be other differences as well).
 
