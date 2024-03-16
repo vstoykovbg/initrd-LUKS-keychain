@@ -1,6 +1,6 @@
 #!/bin/sh
 
-script_version="06032024-0247"
+script_version="16032024-1655"
 
 PREREQ=""
 
@@ -93,7 +93,7 @@ try_to_mount_device() {
             echo "Removing the directory \"${mount_point}\"..."
             rmdir "${mount_point}"
             debug_pause 5
-            return 1
+            return 1 # Mounted but no encrypted container found within the filesystem.
 
         fi
         
@@ -115,7 +115,7 @@ try_to_mount_device() {
               echo "Removing the directory \"${mount_point}\"..."
               rmdir "${mount_point}"
               debug_pause 5
-              return 1 # Mounted but failed to open encrypted container within the filesystem.
+              return 3 # Mounted but failed to open encrypted container within the filesystem.
           fi
 
         else
@@ -125,7 +125,7 @@ try_to_mount_device() {
           echo "Removing the directory \"${mount_point}\"..."
           rmdir "${mount_point}"
           debug_pause 5
-          return 1 # Mounted but failed to open encrypted container within the filesystem.
+          return 4 # Mounted but failed to open encrypted container within the filesystem because LUKS header was not found.
         fi
 
         return 0 # Success.
@@ -147,11 +147,15 @@ dialog_1() {
     if [ $mount_status -eq 0 ]; then
       return 0 # Success.
     elif [ $mount_status -eq 1 ]; then
-      return 1 # Mounted but failed to open encrypted container within the filesystem.
+      return 1 # Mounted but no encrypted container found within the filesystem.
+    elif [ $mount_status -eq 3 ]; then
+      return 3 # Mounted but failed to open encrypted container within the filesystem.
+    elif [ $mount_status -eq 4 ]; then
+      return 4 # Mounted but failed to open encrypted container within the filesystem because LUKS header was not found.
     fi
-   
-    
-    # If other exit status - continue.
+
+
+    # If exit status is 2 or other exit status - continue.
 
     while :; do
       echo
@@ -173,8 +177,9 @@ dialog_1() {
       echo -n "Enter your choice by pressing [1-7]: "
 
       read -n 1 -r choice
-      clear_character
-      echo ""
+      #clear_character
+      #echo ""
+      clear_the_line
       
       #if [ -z "${choice}" ]; then # if it's empty
       #  choice="4"
@@ -225,15 +230,12 @@ loop_trying_to_open_device() {
     dialog_1_return_status=0
 
     echo "DEBUG: \$dialog_1_return_status: \"$dialog_1_return_status\" (at the beginning of loop_trying_to_open_device())."
-    if [ $dialog_1_return_status -eq 0 ]; then
-        echo "DEBUG: the number is 0."
-    fi
     debug_pause 5
     
 
 
     # FIXME: there is no continue or break in this loop, only exit and return. Do wee need it? 
-    while :; do # The main loop of loop_trying_to_open_device()
+    #while :; do # The main loop of loop_trying_to_open_device()
 
         cryptsetup_luksDump_output=$(cryptsetup luksDump "${this_device}" 2>&1 | grep "is not a valid LUKS device")
 
@@ -333,9 +335,10 @@ loop_trying_to_open_device() {
             
             echo "DEBUG: \$dialog_1_return_status: \"$dialog_1_return_status\""
             debug_pause 5
-            if [ $dialog_1_return_status -eq 2 ]; then
+            #if [ $dialog_1_return_status -eq 2 ]; then
+            if [ $dialog_1_return_status -gt 1 ]; then
                 echo "Returning to the previous step."
-                return 2
+                return $dialog_1_return_status
             else
                 echo "Did not opened the encrypted keychain."
                 return 1
@@ -343,7 +346,7 @@ loop_trying_to_open_device() {
 
         fi
 
-    done # The main loop of loop_trying_to_open_device()
+    #done # The main loop of loop_trying_to_open_device()
 
 }
 
@@ -358,13 +361,21 @@ search_by_UUID_inner() {
 
     # Only one of the devices with that UUID pattern is returned!
     #selected_device=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep "${this_blkid_line_substring}" | cut -d \: -f 1 | sed -n '1p')
-    search_results=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep "${this_blkid_line_substring}")
+
+    # New version - many results are returned and uppercase is ignored if it's lukskeychain (because of FAT labels):
+
+    if [ "${this_blkid_line_substring}" = "lukskeychain" ]; then 
+        # ignoring case - because FAT filesystems have uppercase labels
+        search_results=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep -i "LUKSKEYCHAIN")
+    else
+        search_results=$(blkid | grep "^/dev/" | grep -v "^/dev/loop" | grep "${this_blkid_line_substring}")
+    fi
    
     if [ -z "${search_results}" ]; then 
         return 1
     elif [ "$(echo "$search_results" | wc -l)" -eq 1 ]; then 
         selected_device=$(echo "$search_results" | awk -F ':' '{print $1}')
-        echo "Found one device mathcing your substring: $selected_device"
+        echo "Found one device matching your substring: $selected_device"
     else 
         echo "Found many devices matching your substring:"
         index=1
@@ -416,9 +427,11 @@ search_by_UUID() {
     this_UUID="$1"
     first_retry="$2"
 
-    timeout=60
+    skip_searching_by_UUID_one_time="no"
 
     while :; do
+
+        timeout=60
 
         selected_device="" # Global variable - changed by search_by_UUID_inner()
 
@@ -439,9 +452,13 @@ search_by_UUID() {
             timeout=30
         fi
 
-        echo "Trying to find a device with a blkid line containing the string \"${this_UUID}\"..."
-        search_by_UUID_inner "${this_UUID}" # Changing the $selected_device global variable.
-
+        if [ "${skip_searching_by_UUID_one_time}" = "no" ]; then
+            echo "Trying to find a device with a blkid line containing the string \"${this_UUID}\"..."
+            search_by_UUID_inner "${this_UUID}" # Changing the $selected_device global variable.
+        else
+            skip_searching_by_UUID_one_time="no"
+            selected_device=""
+        fi
 
         if [ ! -z "${selected_device}" ]; then 
 
@@ -455,49 +472,42 @@ search_by_UUID() {
             
             if [ $loop_trying_to_open_device_exit_status -eq 2 ]; then
               this_UUID=""
+            elif [ $loop_trying_to_open_device_exit_status -gt 2 ]; then
+                skip_searching_by_UUID_one_time="yes"
+                continue
             fi
             
             first_retry="no"
 
         else
 
-
-            # if [ "${first_retry}" = "yes" ]; then
-            # The previous version of the script tried only once this block of code
             if [ "${GLOBAL_skip_automatic_search_by_name_lukskeychain}" = "no" ]; then
 
-                #echo ""
-                #echo "Device with UUID (or blkid line substring) \"${this_UUID}\" not found."
+                #GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
 
-                if [ "${GLOBAL_skip_automatic_search_by_name_lukskeychain}" = "no" ]; then
-
-                    #GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
-
-                    #echo "Trying to find a device with a label or name containing the string 'lukskeychain'..."
-                    dialog_skip_or_do 5 "Trying to find a device with a label or name containing the string 'lukskeychain'..."
-                        if [ $? -gt 0 ]; then # if not opened we will not retry
-                            GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
-                            continue
-                        fi
-
-                    # Only one of the devices with that string is returned!
-                    # selected_device=$(blkid | grep lukskeychain | cut -d \: -f 1 | sed -n '1p')
-
-                    # This version allows the user to select when many devices with 'lukskeychain' in the label are found.
-                    search_by_UUID_inner "lukskeychain" # Changing the $selected_device global variable.
-
-                    if [ ! -z "${selected_device}" ]; then 
-
-                      loop_trying_to_open_device "${selected_device}"
-                        if [ $? -gt 0 ]; then # if not opened we will not retry
-                            GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
-                        fi
-                        
-                      first_retry="no"
-                      continue
-                      
+                #echo "Trying to find a device with a label or name containing the string 'lukskeychain'..."
+                dialog_skip_or_do 5 "Trying to find a device with a label or name containing the string 'lukskeychain'..."
+                    if [ $? -gt 0 ]; then # if not opened we will not retry
+                        GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+                        continue
                     fi
-                
+
+                # Only one of the devices with that string is returned!
+                # selected_device=$(blkid | grep lukskeychain | cut -d \: -f 1 | sed -n '1p')
+
+                # This version allows the user to select when many devices with 'lukskeychain' in the label are found.
+                search_by_UUID_inner "lukskeychain" # Changing the $selected_device global variable.
+
+                if [ ! -z "${selected_device}" ]; then 
+
+                  loop_trying_to_open_device "${selected_device}"
+                    if [ $? -gt 0 ]; then # if not opened we will not retry
+                        GLOBAL_skip_automatic_search_by_name_lukskeychain="yes"
+                    fi
+                    
+                  first_retry="no"
+                  continue
+                  
                 fi
 
             fi
@@ -523,9 +533,16 @@ search_by_UUID() {
 
             choice="1" # Setting the default value of choice to '1' because the BusyBox read command
                        # doesn't change its value when no user input is provided.
-            
+
+            if [ "${default_UUID}" !=  "${this_UUID}" ]; then
+                echo -n "Enter your choice by pressing [1-5]: "
+            else
+                echo -n "Enter your choice by pressing [1-4]: "
+            fi
             read -t $timeout -n 1 -r choice
-            clear_character
+            #clear_character
+            #echo ""
+            clear_the_line
 
             if [ -z "${choice}" ]; then
                 echo "Retrying..."
